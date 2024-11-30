@@ -12,24 +12,30 @@
 #include <linux/slab.h>
 #include <linux/init.h>
 #include <asm/div64.h>
+#include <linux/timer.h>
+#include <linux/kernel.h>
+#include <linux/list.h>
+#include <linux/jiffies.h>
+#include <linux/types.h>
 
 
 /* estruturas de dados para o C-SCAN. */
 struct cscan_data_s {
 	struct list_head queue; // lista de requisições
-	
+	int pointer;
+	struct timer_list timer; // timer para despachar requisições
 };
 
 struct disk_data_s {
 	int head_last_pos;	// ultima posição da cabeça
 	int head_pos;		// posição atual da cabeça
-	char head_dir;		// direçao de acesso ([P]arked, [L]eft, [R]ight)
+	char head_dir;		// direçao de acesso 
 };
 
 // PARÂMETROS
 static int queue_size = 10;
 static int wait_time = 100;
-static bool debug = 0;
+static bool debug = false;
 
 module_param(queue_size, int, 0644);
 MODULE_PARM_DESC(queue_size, "Tamanho da fila de requisições");
@@ -48,68 +54,105 @@ static void cscan_merged_requests(struct request_queue *q, struct request *rq, s
 
 /* Esta função despacha o próximo bloco a ser lido. */
 static int cscan_dispatch(struct request_queue *q, int force)
-{ 	
-	struct cscan_data_s *nd = q->elevator->elevator_data;
-	char direction;
-	struct request *rq;
+{
+	// printk(KERN_ALERT "[C-SCAN] DISPATCH\n");
+    struct cscan_data_s *nd = q->elevator->elevator_data;
+    struct request *rq = NULL;
+    struct request *best = NULL;
+    struct list_head *pos;
 	uint64_t time;
 
-	if(list_empty(&nd->queue)){
-		printk(KERN_ALERT "[C-SCAN] dsp -1\n");
-		return 0;
-	}
+    if (list_empty(&nd->queue)) {
+        if (debug)
+            printk(KERN_ALERT "[C-SCAN] dsp -1 (fila vazia)\n");
+        return 0;
+    }
 
+    // Percorre a fila para encontrar a próxima requisição no sentido atual
+    list_for_each(pos, &nd->queue) {
+        struct request *tmp = list_entry(pos, struct request, queuelist);
+        if (blk_rq_pos(tmp) >= nd->pointer) {
+            best = tmp;
+            break;
+        }
+    }
 
+    // Se não encontrou, reinicia a busca no início da lista (comportamento circular)
+    if (!best) {
+		if(debug) 
+			printk(KERN_EMERG "[C-SCAN] dsp -1 (não encontrou - voltando ao começo)\n");
+        best = list_first_entry(&nd->queue, struct request, queuelist);
+    }
 
-	// Código base
-	rq = list_first_entry_or_null(&nd->queue, struct request, queuelist);
-	if (rq) {
-		list_del_init(&rq->queuelist);
-		elv_dispatch_sort(q, rq);
-		
-		direction = rq_data_dir(rq) == READ ? 'R' : 'W';
-		time = ktime_get_ns();
-		do_div(time, 1000000);
+    // Despacha a requisição encontrada
+    rq = best;
+    list_del_init(&rq->queuelist);
+    elv_dispatch_sort(q, rq);
+    nd->pointer = blk_rq_pos(rq); // Atualiza a posição do header
+
+	char direction = rq_data_dir(rq) == READ ? 'R' : 'W';
+	time = ktime_get_ns();
+	do_div(time, 1000000);
+	if(debug)
 		printk(KERN_ALERT "[C-SCAN] dsp %c %llu (%llu ms)\n", direction, blk_rq_pos(rq), time);
 
-		return 1;
-	}
-
-	return 0;
+    return 1;
 }
 
 /* Esta função adiciona uma requisição ao disco em uma fila */
 static void cscan_add_request(struct request_queue *q, struct request *rq)
 {
-	// Ajustar essa função
-
 	struct cscan_data_s *nd = q->elevator->elevator_data;
-	//struct disk_data_s *disk = &disk_data;
+	struct list_head *pos;
 	char direction;
 	uint64_t time;
 
-	/* Aqui deve-se adicionar uma requisição na fila do driver.
-	 * Use como exemplo o driver noop-iosched.c
-	 */
+	// Adiciona a requisição na fila na posicao correta
+	list_for_each(pos, &nd->queue) {
+		struct request *tmp = list_entry(pos, struct request, queuelist);
+		if (blk_rq_pos(rq) < blk_rq_pos(tmp)) {
+			list_add_tail(&rq->queuelist, pos);
+			direction = rq_data_dir(rq) == READ ? 'R' : 'W';
+			time = ktime_get_ns();
+			do_div(time, 1000000);
+			if(debug)
+				printk(KERN_ALERT "[C-SCAN] add %c %llu (%llu ms)\n", direction, blk_rq_pos(rq), time);
+			return;
+		}
+	}
+
+	// Se não encontrou posição, adiiociona no final da fila
 	list_add_tail(&rq->queuelist, &nd->queue);
-	
 	direction = rq_data_dir(rq) == READ ? 'R' : 'W';
 	time = ktime_get_ns();
 	do_div(time, 1000000);
-	printk(KERN_ALERT "[C-SCAN] add %c %llu (%llu ms)\n", direction, blk_rq_pos(rq), time);
+	if(debug)
+		printk(KERN_ALERT "[C-SCAN] add %c %llu (%llu ms)\n", direction, blk_rq_pos(rq), time);
+}
+
+/* Callback do timer */
+static void cscan_timer_fn(unsigned long data)
+{
+    struct cscan_data_s *nd = (struct cscan_data_s *)data;
+    
+	if(!nd || !nd->timer.data) {
+		printk(KERN_ALERT "[C-SCAN] timer_fn -1 (timer com problema)\n");
+		return;
+	}
+
+    if (!list_empty(&nd->queue)) {
+		struct request_queue *q = (struct request_queue *)nd->timer.data;
+        cscan_dispatch(q, 0);
+    }
+
+	mod_timer(&nd->timer, jiffies + msecs_to_jiffies(wait_time));
 }
 
 /* Esta função inicializa as estruturas de dados necessárias para o escalonador */
 static int cscan_init_queue(struct request_queue *q, struct elevator_type *e)
 {
-	// Também implementar isso 
-
 	struct cscan_data_s *nd;
 	struct elevator_queue *eq;
-
-	/* Implementação da inicialização da fila (queue).
-	 * Use como exemplo a inicialização da fila no driver noop-iosched.c
-	 */
 
 	eq = elevator_alloc(q, e);
 	if (!eq)
@@ -124,6 +167,12 @@ static int cscan_init_queue(struct request_queue *q, struct elevator_type *e)
 
 	INIT_LIST_HEAD(&nd->queue);
 
+	// Inicializa o timer
+    init_timer(&nd->timer);
+	nd->timer.function = cscan_timer_fn;
+	nd->timer.data = (unsigned long)q;
+	mod_timer(&nd->timer, jiffies + msecs_to_jiffies(wait_time));
+
 	spin_lock_irq(q->queue_lock);
 	q->elevator = eq;
 	spin_unlock_irq(q->queue_lock);
@@ -133,12 +182,15 @@ static int cscan_init_queue(struct request_queue *q, struct elevator_type *e)
 
 static void cscan_exit_queue(struct elevator_queue *e)
 {
-	// Implementar isso aqui
 	struct cscan_data_s *nd = e->elevator_data;
 
 	/* Implementação da finalização da fila (queue).
 	 * Use como exemplo o driver noop-iosched.c
 	 */
+
+	// Desativa o timer
+	del_timer_sync(&nd->timer);
+
 	BUG_ON(!list_empty(&nd->queue));
 	kfree(nd);
 }

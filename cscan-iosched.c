@@ -29,7 +29,7 @@ struct cscan_data_s {
 struct disk_data_s {
 	int head_last_pos;	// ultima posição da cabeça
 	int head_pos;		// posição atual da cabeça
-	char head_dir;		// direçao de acesso 
+	char head_dir;		// direçao de acesso ([P]arked, [L]eft, [R]ight)
 };
 
 // PARÂMETROS
@@ -81,6 +81,9 @@ static int cscan_dispatch(struct request_queue *q, int force)
     if (!best) {
 		if(debug) 
 			printk(KERN_EMERG "[C-SCAN] dsp -1 (não encontrou - voltando ao começo)\n");
+		
+		nd->pointer = 0;
+
         best = list_first_entry(&nd->queue, struct request, queuelist);
     }
 
@@ -88,7 +91,7 @@ static int cscan_dispatch(struct request_queue *q, int force)
     rq = best;
     list_del_init(&rq->queuelist);
     elv_dispatch_sort(q, rq);
-    nd->pointer = blk_rq_pos(rq); // Atualiza a posição do header
+    nd->pointer = blk_rq_pos(rq); // Atualiza a posição do cabeçote
 
 	char direction = rq_data_dir(rq) == READ ? 'R' : 'W';
 	time = ktime_get_ns();
@@ -153,6 +156,10 @@ static int cscan_init_queue(struct request_queue *q, struct elevator_type *e)
 {
 	struct cscan_data_s *nd;
 	struct elevator_queue *eq;
+
+	/* Implementação da inicialização da fila (queue).
+	 * Use como exemplo a inicialização da fila no driver noop-iosched.c
+	 */
 
 	eq = elevator_alloc(q, e);
 	if (!eq)

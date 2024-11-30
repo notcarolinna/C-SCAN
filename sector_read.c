@@ -11,8 +11,8 @@
 
 #define SECTOR_SIZE	512
 #define DISK_SZ		(4096 * 1024)
-#define N_ACCESSES	50
-#define N_FORKS 	10
+#define N_ACCESSES	50 // é pra ser 50
+#define N_FORKS 	5 // é pra ser 5
 
 int main()
 {
@@ -44,7 +44,7 @@ int main()
 		return errno;
 	}
 
-	strcpy(buf, "C-Scan!");
+	strcpy(buf, "FCSFS!");
 
 	for(i = 0; i < N_FORKS; i++){
 		pid = fork();

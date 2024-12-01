@@ -72,3 +72,15 @@ modprobe cscan-iosched queue_size=<valor> wait_time=<valor> debug=<0|1>
 | Setores Gravados               | 124   |
 | Tempo Gasto em Gravações (ms)  | 136   |
 | Operações I/O Ativas           | 6     |
+
+# Geração de Gráfico  
+
+Para criar o gráfico do escalonamento executado:  
+
+1. **Copie a saída do `sector_read`** com o modo de depuração desativado.  
+2. **Cole a saída no arquivo** `outputs.txt`.  
+3. Execute o comando abaixo para gerar o gráfico:  
+   ```bash
+   python3 graph.py
+   ```  
+O gráfico exibirá os acessos realizados pelo escalonador.  
